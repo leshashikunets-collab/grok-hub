@@ -95,6 +95,7 @@
     <h2>Settings</h2>
     <label>Grok API key (console.x.ai)</label>
     <input type="password" id="grokKey" placeholder="xai-..."/>
+    <p style="font-size:.76rem;color:var(--muted);margin:4px 0 0">Grok требует оплаченные кредиты на console.x.ai. Без них используйте MiMo.</p>
     <label>MiMo API key</label>
     <input type="password" id="mimoKey" placeholder="tp-..."/>
     <p style="font-size:.78rem;color:var(--muted);margin:10px 0 0">Keys stay in your browser only.</p>
@@ -159,7 +160,7 @@ const MODES = {
     sg:["Explain inflation with wit","Should I learn Rust?","Bust a popular myth","Unusual life hack"]}
 };
 
-let provider = "grok";
+let provider = "mimo";
 let mode = "chat";
 let theme = "grok";
 let msgs = [];
@@ -280,6 +281,35 @@ function addMsg(role, content, anim = true) {
 function esc(t) { return t.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 function scroll() { $("msgs").scrollTop = $("msgs").scrollHeight; }
 
+function parseApiError(msg) {
+  const raw = String(msg || "");
+  try {
+    const j = JSON.parse(raw);
+    const code = j.code || j.error?.code || "";
+    const text = j.error || j.message || raw;
+    if (code === "permission-denied" || String(text).includes("credits") || String(text).includes("licenses")) {
+      return {
+        html: `<b>У Grok нет кредитов</b><br>Аккаунт xAI создан, но API не оплачен.<br><br>
+          <a href="https://console.x.ai" target="_blank" style="color:var(--accent)">Пополнить на console.x.ai</a><br><br>
+          Или переключитесь на <b>MiMo</b> вверху — работает сразу.`,
+        switchMimo: true
+      };
+    }
+    if (code === "invalid_api_key" || String(text).includes("api key")) {
+      return { html: `<b>Неверный API-ключ Grok</b><br>Проверьте ключ в ⚙ Настройках.`, switchMimo: false };
+    }
+    return { html: esc(typeof text === "string" ? text : raw), switchMimo: false };
+  } catch (_) {
+    if (raw.includes("credits") || raw.includes("permission-denied")) {
+      return {
+        html: `<b>У Grok нет кредитов.</b> Используйте <b>MiMo</b> или пополните баланс на console.x.ai.`,
+        switchMimo: true
+      };
+    }
+    return { html: esc(raw), switchMimo: false };
+  }
+}
+
 async function onFiles(e) {
   for (const f of e.target.files) {
     if (f.size > 300000) { alert(f.name + " too large"); continue; }
@@ -370,7 +400,15 @@ async function send(text, regen = false) {
     msgs.push({role: "assistant", content: reply});
     save();
   } catch (e) {
-    bubble.innerHTML = `<span style="color:#f87171">Error: ${esc(e.message)}</span>`;
+    const err = parseApiError(e.message);
+    bubble.innerHTML = `<div style="color:#f87171;line-height:1.5">${err.html}</div>`;
+    if (err.switchMimo && provider === "grok") {
+      provider = "mimo";
+      $("providerSel").value = "mimo";
+      renderModels();
+      save();
+      $("status").textContent = "Переключено на MiMo — попробуйте снова";
+    }
   } finally {
     busy = false;
     $("sendBtn").disabled = false;
