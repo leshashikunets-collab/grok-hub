@@ -61,11 +61,33 @@
     .modal input{width:100%;padding:10px;border-radius:10px;border:1px solid var(--border);background:var(--bg);color:var(--text);font:inherit}
     .modal .row{display:flex;gap:8px;margin-top:14px}
     .modal .row .btn{flex:1}
+    .bar .title{flex:1;font-size:.85rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+    .backdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:40;display:none}
+    .backdrop.open{display:block}
+    .drawer{position:fixed;top:0;left:0;width:min(320px,88vw);height:100dvh;background:var(--panel);border-right:1px solid var(--border);z-index:50;transform:translateX(-105%);transition:.2s;display:flex;flex-direction:column}
+    .drawer.open{transform:translateX(0)}
+    .drawer-head{padding:14px 12px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center}
+    .drawer-head b{flex:1}
+    .drawer-list{flex:1;overflow-y:auto}
+    .chat-item{padding:11px 12px;border-bottom:1px solid var(--border);cursor:pointer;display:flex;gap:8px;align-items:center}
+    .chat-item.on{background:var(--accent-soft)}
+    .chat-item .t{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:.88rem}
+    .chat-item .x{background:none;border:none;color:var(--muted);font-size:1.1rem;cursor:pointer;padding:0 4px}
   </style>
 </head>
 <body data-theme="grok">
+<div class="backdrop" id="backdrop"></div>
+<aside class="drawer" id="drawer">
+  <div class="drawer-head">
+    <b>Диалоги</b>
+    <button class="btn" id="newChatBtn2">+ Новый</button>
+    <button class="btn" id="closeDrawer">✕</button>
+  </div>
+  <div class="drawer-list" id="chatList"></div>
+</aside>
 <div class="app">
   <div class="top">
+    <button class="btn icon" id="chatsBtn" title="Диалоги">💬</button>
     <div class="logo">⚡ <span>Grok Hub</span></div>
     <select class="ctrl" id="providerSel" title="AI provider"></select>
     <select class="ctrl" id="modelSel"></select>
@@ -74,9 +96,12 @@
   </div>
   <div class="modes" id="modes"></div>
   <div class="bar">
-    <div class="status" id="status">Ready</div>
-    <button class="btn" id="newChatBtn">+ New</button>
-    <button class="btn" id="regenBtn">↻</button>
+    <div class="title" id="chatTitle">Новый чат</div>
+    <button class="btn" id="newChatBtn">+ Новый</button>
+    <button class="btn" id="regenBtn" title="Повторить ответ">↻</button>
+  </div>
+  <div class="bar" style="padding-top:0;border-top:none">
+    <div class="status" id="status">Готов</div>
   </div>
   <div class="msgs" id="msgs"><div class="inner" id="inner"></div></div>
   <div class="composer">
@@ -160,29 +185,129 @@ const MODES = {
     sg:["Explain inflation with wit","Should I learn Rust?","Bust a popular myth","Unusual life hack"]}
 };
 
-let provider = "mimo";
-let mode = "chat";
+const STORAGE_KEY = "grok_hub_v2";
 let theme = "grok";
-let msgs = [];
 let atts = [];
 let busy = false;
 let keys = {grok:"", mimo: PROVIDERS.mimo.defaultKey};
+let state = loadState();
+let chatId = state.activeId;
+let provider = cur().provider || "mimo";
+let mode = cur().mode || "chat";
 
 const $ = id => document.getElementById(id);
 
-function load() {
+function defaultChat() {
+  const id = crypto.randomUUID();
+  return { id, title:"Новый чат", messages:[], mode:"chat", provider:"mimo", updatedAt:Date.now() };
+}
+function defaultState() {
+  const c = defaultChat();
+  return { activeId:c.id, theme:"grok", keys, chats:{ [c.id]:c } };
+}
+function loadState() {
   try {
-    const s = JSON.parse(localStorage.getItem("grok_hub_v1") || "null");
-    if (!s) return;
-    provider = s.provider || provider;
-    mode = s.mode || mode;
-    theme = s.theme || theme;
-    msgs = s.msgs || [];
-    keys = {...keys, ...s.keys};
+    const s = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+    if (s && s.chats) {
+      if (s.keys) keys = {...keys, ...s.keys};
+      return s;
+    }
+    const old = JSON.parse(localStorage.getItem("grok_hub_v1") || "null");
+    if (old) {
+      const c = defaultChat();
+      c.messages = (old.msgs || []).slice(-80);
+      c.mode = old.mode || "chat";
+      c.provider = old.provider || "mimo";
+      c.title = c.messages.length ? "Сохранённый чат" : "Новый чат";
+      c.updatedAt = Date.now();
+      return { activeId:c.id, theme:old.theme || "grok", keys:{...keys, ...(old.keys||{})}, chats:{ [c.id]:c } };
+    }
   } catch (_) {}
+  return defaultState();
 }
 function save() {
-  localStorage.setItem("grok_hub_v1", JSON.stringify({provider, mode, theme, msgs: msgs.slice(-60), keys}));
+  state.activeId = chatId;
+  state.theme = theme;
+  state.keys = keys;
+  const trimmed = {};
+  for (const [id, c] of Object.entries(state.chats)) {
+    trimmed[id] = {...c, messages:(c.messages||[]).slice(-80)};
+  }
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({...state, chats:trimmed}));
+}
+function cur() { return state.chats[chatId]; }
+function msgs() { return cur().messages; }
+
+function openDrawer() { $("drawer").classList.add("open"); $("backdrop").classList.add("open"); }
+function closeDrawer() { $("drawer").classList.remove("open"); $("backdrop").classList.remove("open"); }
+
+function createChat() {
+  const c = defaultChat();
+  c.mode = mode;
+  c.provider = provider;
+  state.chats[c.id] = c;
+  chatId = c.id;
+  atts = [];
+  renderAtts();
+  applyChatSettings();
+  save();
+  renderAll();
+  closeDrawer();
+}
+function deleteChat(id, e) {
+  e.stopPropagation();
+  if (Object.keys(state.chats).length <= 1) {
+    const c = state.chats[id];
+    c.messages = [];
+    c.title = "Новый чат";
+    c.updatedAt = Date.now();
+    save();
+    renderAll();
+    return;
+  }
+  delete state.chats[id];
+  if (chatId === id) chatId = Object.keys(state.chats)[0];
+  applyChatSettings();
+  save();
+  renderAll();
+}
+function switchChat(id) {
+  chatId = id;
+  applyChatSettings();
+  atts = [];
+  renderAtts();
+  save();
+  renderAll();
+  closeDrawer();
+}
+function applyChatSettings() {
+  const c = cur();
+  provider = c.provider || "mimo";
+  mode = c.mode || "chat";
+  $("providerSel").value = provider;
+  $("themeSel").value = theme;
+  renderModels();
+  renderModes();
+}
+function renderChatList() {
+  $("chatList").innerHTML = "";
+  Object.values(state.chats)
+    .sort((a,b) => (b.updatedAt||0) - (a.updatedAt||0))
+    .forEach(c => {
+      const row = document.createElement("div");
+      row.className = "chat-item" + (c.id === chatId ? " on" : "");
+      const ic = MODES[c.mode||"chat"]?.icon || "💬";
+      const pn = PROVIDERS[c.provider||"mimo"]?.name || "AI";
+      row.innerHTML = `<span class="t">${ic} ${c.title} · ${pn}</span><button class="x" title="Удалить">×</button>`;
+      row.onclick = () => switchChat(c.id);
+      row.querySelector(".x").onclick = e => deleteChat(c.id, e);
+      $("chatList").appendChild(row);
+    });
+}
+function renderAll() {
+  renderChatList();
+  $("chatTitle").textContent = cur().title;
+  render();
 }
 
 function getKey() {
@@ -190,7 +315,8 @@ function getKey() {
 }
 
 function init() {
-  load();
+  theme = state.theme || theme;
+  keys = {...keys, ...(state.keys||{})};
   $("grokKey").value = keys.grok || "";
   $("mimoKey").value = keys.mimo || "";
   document.body.dataset.theme = theme;
@@ -199,14 +325,22 @@ function init() {
     `<option value="${k}">${p.name}</option>`).join("");
   $("themeSel").innerHTML = THEMES.map(t => `<option value="${t.id}">${t.name}</option>`).join("");
 
-  $("providerSel").value = provider;
-  $("themeSel").value = theme;
-  renderModels();
-  renderModes();
-  render();
+  applyChatSettings();
+  renderAll();
 
-  $("providerSel").onchange = () => { provider = $("providerSel").value; renderModels(); render(); save(); };
-  $("themeSel").onchange = () => { theme = $("themeSel").value; document.body.dataset.theme = theme; save(); };
+  $("providerSel").onchange = () => {
+    provider = $("providerSel").value;
+    cur().provider = provider;
+    cur().updatedAt = Date.now();
+    renderModels();
+    renderAll();
+    save();
+  };
+  $("themeSel").onchange = () => {
+    theme = $("themeSel").value;
+    document.body.dataset.theme = theme;
+    save();
+  };
   $("settingsBtn").onclick = () => $("overlay").classList.add("open");
   $("closeSettings").onclick = () => $("overlay").classList.remove("open");
   $("saveSettings").onclick = () => {
@@ -216,7 +350,11 @@ function init() {
     save();
     render();
   };
-  $("newChatBtn").onclick = () => { msgs = []; atts = []; renderAtts(); render(); save(); };
+  $("chatsBtn").onclick = openDrawer;
+  $("backdrop").onclick = closeDrawer;
+  $("closeDrawer").onclick = closeDrawer;
+  $("newChatBtn").onclick = createChat;
+  $("newChatBtn2").onclick = createChat;
   $("regenBtn").onclick = () => send("", true);
   $("sendBtn").onclick = () => send();
   $("attachBtn").onclick = () => $("fileIn").click();
@@ -235,7 +373,7 @@ function renderModes() {
     const b = document.createElement("button");
     b.className = "chip" + (mode === k ? " on" : "");
     b.textContent = m.icon + " " + m.name;
-    b.onclick = () => { mode = k; renderModes(); render(); save(); };
+    b.onclick = () => { mode = k; cur().mode = k; cur().updatedAt = Date.now(); renderModes(); renderAll(); save(); };
     $("modes").appendChild(b);
   });
 }
@@ -252,9 +390,10 @@ function render() {
     return;
   }
 
-  if (!msgs.length) {
+  const chatMsgs = msgs();
+  if (!chatMsgs.length) {
     inner.innerHTML = `<div class="welcome"><h1>${m.icon} <span>${m.name}</span></h1>
-      <p>${p.name} · themes · modes · files 📎<br>Works on phone without PC.</p><div class="sg" id="sg"></div></div>`;
+      <p>${p.name} · темы · режимы · файлы 📎<br>Диалоги сохраняются автоматически. Нажмите 💬 для истории.</p><div class="sg" id="sg"></div></div>`;
     m.sg.forEach(t => {
       const b = document.createElement("button");
       b.textContent = t;
@@ -263,7 +402,7 @@ function render() {
     });
     return;
   }
-  msgs.forEach(x => addMsg(x.role, x.content, false));
+  chatMsgs.forEach(x => addMsg(x.role, x.content, false));
   scroll();
 }
 
@@ -335,30 +474,34 @@ async function send(text, regen = false) {
   const key = getKey();
   if (!key) { $("overlay").classList.add("open"); return; }
 
+  const chat = cur();
+  const chatMsgs = chat.messages;
   const p = PROVIDERS[provider];
   const m = MODES[mode];
   let userText = regen ? "" : buildContent((text || $("input").value).trim());
 
   if (regen) {
-    if (!msgs.length || msgs.at(-1).role !== "assistant") return;
-    msgs.pop();
+    if (!chatMsgs.length || chatMsgs.at(-1).role !== "assistant") return;
+    chatMsgs.pop();
   } else {
     if (!userText) return;
-    msgs.push({role: "user", content: userText});
+    if (chat.title === "Новый чат") chat.title = (text || $("input").value).trim().slice(0, 42) || "Чат с файлами";
+    chatMsgs.push({role: "user", content: userText});
+    chat.updatedAt = Date.now();
     $("input").value = "";
     atts = [];
     renderAtts();
   }
 
   save();
-  render();
+  renderAll();
   const bubble = addMsg("assistant", "");
   busy = true;
   $("sendBtn").disabled = true;
-  $("status").textContent = p.name + " thinking...";
+  $("status").textContent = p.name + " думает...";
 
   const sys = m[provider] || m.grok;
-  const apiMsgs = [{role: "system", content: sys}, ...msgs];
+  const apiMsgs = [{role: "system", content: sys}, ...chatMsgs];
 
   try {
     const res = await fetch(p.url, {
@@ -397,13 +540,17 @@ async function send(text, regen = false) {
         } catch (e) { if (e.message && !e.message.includes("JSON")) throw e; }
       }
     }
-    msgs.push({role: "assistant", content: reply});
+    chatMsgs.push({role: "assistant", content: reply});
+    chat.updatedAt = Date.now();
     save();
+    renderChatList();
+    $("chatTitle").textContent = chat.title;
   } catch (e) {
     const err = parseApiError(e.message);
     bubble.innerHTML = `<div style="color:#f87171;line-height:1.5">${err.html}</div>`;
     if (err.switchMimo && provider === "grok") {
       provider = "mimo";
+      chat.provider = "mimo";
       $("providerSel").value = "mimo";
       renderModels();
       save();
@@ -412,7 +559,7 @@ async function send(text, regen = false) {
   } finally {
     busy = false;
     $("sendBtn").disabled = false;
-    $("status").textContent = "Ready · " + p.name;
+    $("status").textContent = "Готов · " + p.name;
   }
 }
 
